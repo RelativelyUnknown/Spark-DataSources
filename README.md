@@ -1,2 +1,66 @@
 # Spark-DataSources
-Here's where i put all my work around custom data sources in pyspark
+
+Custom PySpark Python Data Sources. First experiment: **can a Rust (maturin/PyO3) extension back a
+PySpark data source, and is it worth it vs pure Python or a CPython-native (Cython) extension?**
+
+Short answer: yes, it works with no Spark-side changes. A `DataSourceReader.read()` is plain Python running
+in the worker, so it can call any importable extension. Rust pays off mostly when it **returns Arrow
+`RecordBatch`es** (zero-copy into pyarrow) and releases the GIL during I/O + parsing; returning row tuples
+removes most of the gain.
+
+## Quick start
+```bash
+make setup      # uv venv + uv sync (builds the Rust and Cython extensions; needs cargo + uv)
+make test       # all implementations return identical DataFrames
+make bench      # CLI benchmark
+make notebook   # marimo notebook with sliders + chart
+```
+Requirements: Python 3.10+, Java 17+, Rust toolchain, `uv`.
+
+## Layout
+| Path | What |
+|---|---|
+| `src/spark_datasources/` | `base.py` (generic reader + factory), `pure_python.py`, `sources.py` (registry) |
+| `rust_ext/` | maturin crate `sparkhttp_rs`: `ureq` + `serde_json`, `fetch_tuples` and `fetch_batch` (arrow-rs → pyarrow) |
+| `cython_ext/` | Cython module `sparkhttp_cy`: `http.client` + `orjson`, typed tuple building |
+| `bench/` | `mock_server.py` (deterministic paginated JSON API), `harness.py`, `run_bench.py` |
+| `notebooks/benchmark.py` | marimo notebook (plain `.py`) |
+
+## Data source
+`spark.read.format("http_rust_arrow").option("url", base).option("total_rows", N).option("partitions", P).option("page_size", S).load()`
+reads `GET {url}/records?offset=&limit=` pages (`id long, value double, name string, ts long`), one Spark
+partition per row range. Formats: `http_py`, `http_py_arrow`, `http_rust`, `http_rust_arrow`, `http_cython`.
+Call `spark_datasources.register_all(spark)` first.
+
+## Results (1M rows, 4 partitions, local[4], 4-core sandbox, median of 3, single run — noisy)
+Micro (one 50k-row page fetch+parse outside Spark):
+
+| Implementation | rows/s |
+|---|---|
+| Python json → tuples | 1.03M |
+| Python json → Arrow | 0.96M |
+| Cython + orjson → tuples | 1.34M |
+| Rust → tuples | 2.65M |
+| Rust → Arrow | 4.62M |
+
+End-to-end through Spark:
+
+| Implementation | scan (read+sum) s | toPandas s |
+|---|---|---|
+| Python tuples | 0.81 | 1.72 |
+| Python → Arrow | 0.53 | 0.93 |
+| Rust tuples | 0.61 | 0.90 |
+| Rust Arrow | **0.27** | 0.86 |
+| Cython + orjson | 0.62 | 1.09 |
+
+Takeaways: (1) Arrow output matters as much as the language — even pure Python gains ~1.5x from it;
+(2) Rust+Arrow is ~3x faster than the baseline on scan, but once rows must travel to the driver
+(`toPandas`) Spark's own JVM↔Python transfer dominates and the gap shrinks; (3) Cython+orjson gets part
+of the way with far less build complexity; (4) the mock server and Spark JVM share the same 4 cores, so
+treat numbers as directional.
+
+## Notes / caveats
+- Native modules are **not pickled** to executors: they must be installed on every worker
+  (`abi3` wheel from maturin makes that one wheel per platform, not per Python version).
+- Workers must use the same interpreter: tests/bench set `PYSPARK_PYTHON=sys.executable`.
+- Not covered yet: MQTT/streaming source, writers, pushdown, cluster-mode, free-threaded Python.

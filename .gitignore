@@ -218,3 +218,11 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# project
+.venv/
+rust_ext/target/
+cython_ext/build/
+cython_ext/*.c
+bench/results.json
+__marimo__/
