@@ -21,7 +21,7 @@ Requirements: Python 3.10+, Java 17+, Rust toolchain, `uv`.
 | Path | What |
 |---|---|
 | `src/spark_datasources/` | `base.py` (generic reader + factory), `pure_python.py`, `sources.py` (registry) |
-| `rust_ext/` | maturin crate `sparkhttp_rs`: `ureq` + `serde_json`, `fetch_tuples` and `fetch_batch` (arrow-rs → pyarrow) |
+| `rust_ext/` | maturin crate `sparkhttp_rs`: `ureq` + `serde_json`, `fetch_tuples` and `fetch_batch` (arrow-rs → pyarrow), regex log parser, NDJSON writer, parquet reader |
 | `cython_ext/` | Cython module `sparkhttp_cy`: `http.client` + `orjson`, typed tuple building |
 | `bench/` | `mock_server.py` (deterministic paginated JSON API), `harness.py`, `run_bench.py` |
 | `notebooks/benchmark.py` | marimo notebook (plain `.py`) |
@@ -74,8 +74,44 @@ Animated chart of every table: open [`docs/results.html`](docs/results.html) (`m
 - **MQTT:** broker-bound (pure-Python `amqtt`); decode language does not matter. `SimpleDataSourceStreamReader`
   can only return rows, so there are no Arrow arms; replay after restart is not supported (PoC).
 
+## Parquet: Rust reader vs Spark's built-in
+`spark.read.format("parquet_rust").option("path", dir).load()` (also `parquet_pyarrow`, a pyarrow reference engine).
+Implementation: arrow-rs `parquet` crate in `rust_ext` (footer inspection + a GIL-free streaming batch iterator),
+planning/options in `src/spark_datasources/parquet_source.py`. Options mirror Spark's defaults:
+`mergeSchema=false`, `pathGlobFilter`, `recursiveFileLookup=false`, `ignoreCorruptFiles=false`,
+`ignoreMissingFiles=false`, `maxPartitionBytes=128MB`, `openCostInBytes=4MB`; files starting with `_`/`.` are
+skipped, INT96/any timestamp reads as `timestamp[us, UTC]`, everything is nullable, columns match by name
+case-insensitively with NULL for absent ones, and splits follow Spark's `FilePartition` packing.
+Tests (`tests/test_parquet.py`) compare every result row-for-row with `spark.read.parquet` on a Spark-written
+dataset (INT96 timestamps, decimal, date, array, struct, nulls, many row groups).
+
+**Not supported:** hive-style partition discovery (`k=v` dirs), datetime rebase modes, filter pushdown,
+`modifiedBefore/After`, and *automatic* column pruning — a Python data source only sees the schema you pass, so
+use `.schema("d double")` to prune.
+
+Results (10M rows, 8 Spark-written files, 315MB, snappy, local[4], single run, directional):
+
+| Query | Spark built-in | Rust source | pyarrow source |
+|---|---|---|---|
+| full scan, all 8 columns | **1.13 s** | 1.58 s | 1.96 s |
+| one column (`sum(d)`) | **0.29 s** | 0.41 s | 0.49 s |
+| `count(*)` | **0.19 s** | 0.45 s | 0.51 s |
+| decode one file outside Spark (rows/s) | – | 13.4M | 15.3M |
+
+- The built-in reader wins every query: it is JVM-native, vectorized, prunes from the query and never crosses a
+  process boundary. A Python data source pays Arrow transfer to the JVM (a ~0.4 s floor here even for `count(*)`).
+- Rust is ~1.4x slower than built-in on a full scan, and ~1.2x faster than pyarrow inside Spark even though pyarrow
+  decodes a single file a bit faster standalone (its decode threads compete with Spark's task threads; Rust
+  releases the GIL and stays single-threaded per task).
+- Tuning that mattered: asking arrow-rs to decode INT96 straight to `timestamp[us]` (schema hint) cut that
+  column from 44 ms to 16 ms; reading the file into memory first was slower and was reverted.
+- Takeaway: use a custom parquet source only for something the built-in cannot do (custom footer metadata,
+  special layouts, side effects); for plain parquet the built-in reader is the faster choice.
+
 ## Notes / caveats
+- The MQTT stream benchmark can stall when run as the 4th section of a long `run_bench.py` session (the pytest
+  MQTT tests pass); use `--only <section...>` to run sections separately — results merge into `--json`.
 - Native modules are **not pickled** to executors: they must be installed on every worker
   (`abi3` wheel from maturin makes that one wheel per platform, not per Python version).
 - Workers must use the same interpreter: tests/bench set `PYSPARK_PYTHON=sys.executable`.
-- Not covered yet: pushdown, cluster-mode, free-threaded Python.
+- Not covered yet: filter pushdown, cluster-mode, free-threaded Python.
