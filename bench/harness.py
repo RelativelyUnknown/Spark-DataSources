@@ -231,3 +231,57 @@ def parquet_micro(directory, repeats=5):
         out.append(dict(arm="parquet_" + engine, label=label, rows=n, median_s=statistics.median(ts),
                         rows_per_s=n / statistics.median(ts)))
     return out
+
+
+# ------------------------------------------------------------------ concurrent fan-out
+LABELS.update({"fanout_py_seq": "Python sequential", "fanout_py_threads": "Python threads",
+               "fanout_rust_seq": "Rust sequential", "fanout_rust_threads": "Rust threads",
+               "fanout_rust_async": "Rust async (tokio)"})
+FANOUT_ARMS = ("fanout_py_seq", "fanout_py_threads", "fanout_rust_seq", "fanout_rust_threads", "fanout_rust_async")
+
+
+def fanout_probe(url, pages=100, page_size=1000, latencies=(5, 20, 50), concurrencies=(8, 64, 512)):
+    """No Spark: one partition's worth of pages per call. Rows: arm, latency_ms, concurrency, median_s."""
+    from spark_datasources.fanout import FETCHERS
+
+    offs = list(range(0, pages * page_size, page_size))
+    FETCHERS["fanout_rust_async"](url, offs[:8], page_size, 8, "")
+    out = []
+    for lat in latencies:
+        extra = f"&delay_ms={lat}"
+        for arm in ("fanout_py_seq", "fanout_rust_seq"):
+            ts = _time(lambda: FETCHERS[arm](url, offs, page_size, 1, extra), 1, warmup=0)
+            out.append(dict(arm=arm, label=LABELS[arm], latency_ms=lat, concurrency=1,
+                            median_s=ts[0], pages_per_s=pages / ts[0]))
+        for conc in concurrencies:
+            for arm in ("fanout_py_threads", "fanout_rust_threads", "fanout_rust_async"):
+                ts = _time(lambda: FETCHERS[arm](url, offs, page_size, conc, extra), 2, warmup=0)
+                m = statistics.median(ts)
+                out.append(dict(arm=arm, label=LABELS[arm], latency_ms=lat, concurrency=conc,
+                                median_s=m, pages_per_s=pages / m))
+    return out
+
+
+def server_capacity(url, n=3000):
+    from spark_datasources.fanout import FETCHERS
+
+    s = time.perf_counter()
+    FETCHERS["fanout_rust_async"](url, list(range(0, n * 100, 100)), 100, 512, "")
+    return n / (time.perf_counter() - s)
+
+
+def fanout_bench(spark, url, total_rows=400_000, partitions=4, page_size=1000, latency_ms=20,
+                 concurrency=64, repeats=2):
+    """Through Spark: each of `partitions` tasks fetches total_rows/partitions/page_size pages."""
+    out = []
+    for name in FANOUT_ARMS:
+        def run():
+            return (spark.read.format(name).option("url", url).option("total_rows", total_rows)
+                    .option("partitions", partitions).option("page_size", page_size)
+                    .option("latency_ms", latency_ms).option("concurrency", concurrency)
+                    .load().selectExpr("count(*)", "sum(value)").collect())
+        ts = _time(run, repeats, warmup=1)
+        out.append(dict(arm=name, label=LABELS[name], rows=total_rows, latency_ms=latency_ms,
+                        concurrency=concurrency, median_s=statistics.median(ts), min_s=min(ts),
+                        rows_per_s=total_rows / statistics.median(ts)))
+    return out

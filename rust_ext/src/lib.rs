@@ -381,6 +381,175 @@ fn parquet_batches(
     .map_err(err)
 }
 
+// ---------------------------------------------------------------- concurrent fan-out
+// Fetch many pages for ONE Spark partition. A Spark task is a single thread, so this is where a native
+// runtime can keep hundreds of requests in flight (GIL released throughout). Pages come back in order.
+static RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("tokio runtime")
+});
+
+fn page_url(url: &str, offset: u64, limit: u64, extra: &str) -> String {
+    format!("{url}/records?offset={offset}&limit={limit}{extra}")
+}
+
+fn fetch_with(agent: &ureq::Agent, full: &str) -> Result<RecordBatch, String> {
+    let mut resp = agent.get(full).call().map_err(|e| e.to_string())?;
+    let body = resp
+        .body_mut()
+        .with_config()
+        .limit(u64::MAX)
+        .read_to_vec()
+        .map_err(|e| e.to_string())?;
+    build_batch(&body)
+}
+
+fn fanout_seq(url: &str, offsets: &[u64], limit: u64, extra: &str) -> Result<Vec<RecordBatch>, String> {
+    let agent = ureq::Agent::new_with_defaults();
+    offsets.iter().map(|&o| fetch_with(&agent, &page_url(url, o, limit, extra))).collect()
+}
+
+fn fanout_threads(
+    url: &str,
+    offsets: &[u64],
+    limit: u64,
+    extra: &str,
+    concurrency: usize,
+) -> Result<Vec<RecordBatch>, String> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+    let agent = ureq::Agent::new_with_defaults();
+    let next = AtomicUsize::new(0);
+    let slots: Vec<Mutex<Option<Result<RecordBatch, String>>>> =
+        offsets.iter().map(|_| Mutex::new(None)).collect();
+    std::thread::scope(|s| {
+        for _ in 0..concurrency.min(offsets.len()).max(1) {
+            s.spawn(|| loop {
+                let i = next.fetch_add(1, Ordering::Relaxed);
+                if i >= offsets.len() {
+                    break;
+                }
+                let r = fetch_with(&agent, &page_url(url, offsets[i], limit, extra));
+                *slots[i].lock().unwrap() = Some(r);
+            });
+        }
+    });
+    slots.into_iter().map(|m| m.into_inner().unwrap().unwrap()).collect()
+}
+
+fn fanout_async(
+    url: &str,
+    offsets: &[u64],
+    limit: u64,
+    extra: &str,
+    concurrency: usize,
+) -> Result<Vec<RecordBatch>, String> {
+    use futures_util::{stream, StreamExt};
+    let client = reqwest::Client::new();
+    RUNTIME.block_on(async {
+        stream::iter(offsets.iter().map(|&o| {
+            let (client, full) = (client.clone(), page_url(url, o, limit, extra));
+            async move {
+                let body = client
+                    .get(full)
+                    .send()
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .bytes()
+                    .await
+                    .map_err(|e| e.to_string())?;
+                build_batch(&body)
+            }
+        }))
+        .buffered(concurrency.max(1)) // keeps `concurrency` requests in flight, yields in order
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect()
+    })
+}
+
+/// mode: "seq" | "threads" | "async". `extra` is appended to the query string (e.g. "&delay_ms=20").
+#[pyfunction]
+#[pyo3(signature = (url, offsets, limit, concurrency=64, mode="async", extra=""))]
+fn fanout_batches<'py>(
+    py: Python<'py>,
+    url: &str,
+    offsets: Vec<u64>,
+    limit: u64,
+    concurrency: usize,
+    mode: &str,
+    extra: &str,
+) -> PyResult<Vec<Bound<'py, PyAny>>> {
+    let batches = py
+        .detach(|| match mode {
+            "seq" => fanout_seq(url, &offsets, limit, extra),
+            "threads" => fanout_threads(url, &offsets, limit, extra, concurrency),
+            "async" => fanout_async(url, &offsets, limit, extra, concurrency),
+            m => Err(format!("unknown mode {m}")),
+        })
+        .map_err(err)?;
+    batches.iter().map(|b| b.to_pyarrow(py)).collect()
+}
+
+// ---------------------------------------------------------------- native-library enrichment
+// Columns in: id Int64, lat Float64, lng Float64, text Utf8. Out: id, lat, lng, h3 Int64, hash Int64, words Int32.
+// h3 = H3 cell index (h3o), hash = xxh3-64 of the text (xxhash-rust, reinterpreted as i64),
+// words = UAX#29 word count (unicode-segmentation). None of these have a Spark built-in.
+#[pyfunction]
+fn enrich_batch<'py>(
+    py: Python<'py>,
+    batch: PyArrowType<RecordBatch>,
+    resolution: u8,
+) -> PyResult<Bound<'py, PyAny>> {
+    use arrow::array::{Array, AsArray};
+    use arrow::datatypes::{Float64Type, Int64Type};
+    use unicode_segmentation::UnicodeSegmentation;
+
+    let batch = batch.0;
+    let res = h3o::Resolution::try_from(resolution).map_err(err)?;
+    let out = py
+        .detach(|| {
+            let id = batch.column(0).as_primitive::<Int64Type>();
+            let lat = batch.column(1).as_primitive::<Float64Type>();
+            let lng = batch.column(2).as_primitive::<Float64Type>();
+            let text = batch.column(3).as_string::<i32>();
+            let n = batch.num_rows();
+            let (mut h3, mut hash) = (Int64Builder::with_capacity(n), Int64Builder::with_capacity(n));
+            let mut words = Int32Builder::with_capacity(n);
+            for i in 0..n {
+                let cell = h3o::LatLng::new(lat.value(i), lng.value(i)).map_err(|e| e.to_string())?.to_cell(res);
+                h3.append_value(u64::from(cell) as i64);
+                let t = text.value(i);
+                hash.append_value(xxhash_rust::xxh3::xxh3_64(t.as_bytes()) as i64);
+                words.append_value(t.unicode_words().count() as i32);
+            }
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("id", DataType::Int64, true),
+                Field::new("lat", DataType::Float64, true),
+                Field::new("lng", DataType::Float64, true),
+                Field::new("h3", DataType::Int64, true),
+                Field::new("hash", DataType::Int64, true),
+                Field::new("words", DataType::Int32, true),
+            ]));
+            let cols: Vec<ArrayRef> = vec![
+                batch.column(0).clone(),
+                batch.column(1).clone(),
+                batch.column(2).clone(),
+                Arc::new(h3.finish()),
+                Arc::new(hash.finish()),
+                Arc::new(words.finish()),
+            ];
+            let _ = id;
+            RecordBatch::try_new(schema, cols).map_err(|e| e.to_string())
+        })
+        .map_err(err)?;
+    out.to_pyarrow(py)
+}
+
 #[pymodule]
 fn sparkhttp_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(fetch_tuples, m)?)?;
@@ -389,6 +558,8 @@ fn sparkhttp_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(parse_logs_batch, m)?)?;
     m.add_function(wrap_pyfunction!(write_ndjson, m)?)?;
     m.add_function(wrap_pyfunction!(decode_messages_tuples, m)?)?;
+    m.add_function(wrap_pyfunction!(fanout_batches, m)?)?;
+    m.add_function(wrap_pyfunction!(enrich_batch, m)?)?;
     m.add_function(wrap_pyfunction!(parquet_inspect, m)?)?;
     m.add_function(wrap_pyfunction!(parquet_batches, m)?)?;
     m.add_class::<ParquetBatches>()?;

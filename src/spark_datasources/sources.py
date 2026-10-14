@@ -1,6 +1,8 @@
 import importlib
 
 from .base import make_log_source, make_source, make_writer_source
+from .enrich import ENRICHERS as _ENRICH, make_enrich_source
+from .fanout import FETCHERS as _FANOUT, make_fanout_source
 from .mqtt import make_mqtt_source
 from .parquet_source import make_parquet_source
 
@@ -31,6 +33,10 @@ _SPECS = {
     "mqtt_cython": (make_mqtt_source, "sparkhttp_cy", "decode_messages_tuples"),
 }
 SOURCES = {}
+for _n, _f in _FANOUT.items():  # fan-out arms; the rust ones fail at read time if the module is missing
+    SOURCES[_n] = make_fanout_source(_n, _f)
+for _n, _f in _ENRICH.items():
+    SOURCES[_n] = make_enrich_source(_n, _f)
 # parquet: (name, engine); engine rust needs the native module, resolved at read time
 for _n, _e in (("parquet_rust", "rust"), ("parquet_pyarrow", "pyarrow")):
     SOURCES[_n] = make_parquet_source(_n, _e)

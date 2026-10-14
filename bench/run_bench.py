@@ -12,7 +12,7 @@ def table(rows, cols):
     return head + "\n".join("| " + " | ".join(f(r[c]) for c in cols) + " |" for r in rows)
 
 
-SECTIONS = ("http", "logs", "writers", "mqtt", "parquet")
+SECTIONS = ("http", "logs", "writers", "mqtt", "parquet", "fanout")
 
 
 def main():
@@ -58,6 +58,19 @@ def main():
         print("\n== Parquet in Spark: 10M rows, 8 files (written by Spark with defaults) ==")
         out["parquet"] = harness.parquet_bench(spark, pq_dir, a.repeats)
         print(table(out["parquet"], ["label", "query", "partitions", "median_s", "min_s", "rows_per_s"]))
+    if "fanout" in a.only:
+        aproc, aurl = harness.mock_server.start_async_process()
+        try:
+            out["fanout_capacity_rps"] = harness.server_capacity(aurl)
+            print(f"\n== fan-out: async mock server capacity ~{out['fanout_capacity_rps']:,.0f} req/s ==")
+            print("== fan-out client probe: 100 pages of 1000 rows, outside Spark ==")
+            out["fanout_probe"] = harness.fanout_probe(aurl)
+            print(table(out["fanout_probe"], ["label", "latency_ms", "concurrency", "median_s", "pages_per_s"]))
+            print("\n== fan-out in Spark: 400k rows, 4 partitions x 100 pages, 20 ms latency, concurrency 64 ==")
+            out["fanout"] = harness.fanout_bench(spark, aurl)
+            print(table(out["fanout"], ["label", "rows", "median_s", "min_s", "rows_per_s"]))
+        finally:
+            aproc.terminate()
     if a.json:
         json.dump(out, open(a.json, "w"), indent=1)
 

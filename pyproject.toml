@@ -3,7 +3,7 @@ name = "spark-datasources"
 version = "0.1.0"
 description = "Custom PySpark data sources: pure Python vs Rust (maturin) vs Cython"
 requires-python = ">=3.10"
-dependencies = ["pyspark>=4.0", "pyarrow", "orjson", "sparkhttp-rs", "sparkhttp-cy"]
+dependencies = ["pyspark>=4.0", "pyarrow", "numpy", "orjson", "h3>=4", "xxhash", "sparkhttp-rs", "sparkhttp-cy"]
 
 [dependency-groups]
 dev = ["pytest", "marimo", "pandas<3", "altair", "amqtt", "paho-mqtt"]
