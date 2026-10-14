@@ -226,3 +226,6 @@ cython_ext/build/
 cython_ext/*.c
 bench/results.json
 __marimo__/
+
+bench/parquet_profile/target/
+bench/parquet_profile/Cargo.lock

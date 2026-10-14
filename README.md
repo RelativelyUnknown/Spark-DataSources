@@ -108,6 +108,24 @@ Results (10M rows, 8 Spark-written files, 315MB, snappy, local[4], single run, d
 - Takeaway: use a custom parquet source only for something the built-in cannot do (custom footer metadata,
   special layouts, side effects); for plain parquet the built-in reader is the faster choice.
 
+### Why the Rust reader does not hand-roll unsafe byte-level decoding (measured)
+Spark's vectorized reader and Polars' `polars-parquet` use hand-written decoders (raw byte arrays / `unsafe`,
+per-bit-width unrolled bit-unpacking for RLE/bit-packed dictionary indices and levels, pages decoded straight into
+Arrow-style buffers). Our reader delegates to arrow-rs' decoders, which already specialise bit-unpacking per width.
+Before writing custom kernels I measured whether decoding is the bottleneck:
+
+1. `bench/parquet_profile` (standalone Rust profiler, one 1.25M-row file, 8 columns): **86 ms** total =
+   **58 ms (68%) page read + snappy decompression** and **28 ms (32%) decode + Arrow build**. PLAIN columns
+   (`id`, `d`, `dec`) decode in 1-2 ms (a memcpy; nothing for `unsafe` to win). The slow spots are strings
+   (8.5 ms, dictionary gather) and booleans (6.7 ms), then dictionary ints/dates (2-4 ms).
+2. `bench/parquet_floor.py` (same Rust source, but batches decoded once and replayed from memory, i.e. a decode
+   cost of zero): full scan = **1.47 s**, against **1.71 s** with real decoding and **1.14 s** for the built-in reader.
+
+So decode (including snappy) is only ~0.24 s of ~1.7 s, and the decode+build part that custom kernels could speed
+up is a few percent. The ~1.5 s floor is the Python data source path itself (Python worker, Arrow IPC to the JVM,
+JVM-side conversion), which no decoder change can remove. Hand-written unsafe kernels would be justified for
+standalone/Python-side use (where decode dominates), not for a Spark data source.
+
 ## Notes / caveats
 - The MQTT stream benchmark can stall when run as the 4th section of a long `run_bench.py` session (the pytest
   MQTT tests pass); use `--only <section...>` to run sections separately — results merge into `--json`.
