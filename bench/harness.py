@@ -169,3 +169,65 @@ def mqtt_bench(spark, n_msgs=300, recs_per_msg=1000, port=18832, repeats=2):
         out.append(dict(arm=name, label=LABELS[name], rows=total, median_s=statistics.median(times),
                         min_s=min(times), rows_per_s=total / statistics.median(times)))
     return out
+
+
+# ------------------------------------------------------------------ Parquet
+LABELS.update({"parquet_builtin": "Spark built-in parquet", "parquet_pyarrow": "pyarrow.parquet source",
+               "parquet_rust": "Rust parquet source"})
+
+# (aggregate expressions, DDL schema handed to the data-source arms; None = full file schema).
+# The built-in reader prunes columns from the query by itself; Python data sources only prune
+# when the user supplies `.schema(...)`.
+PQ_QUERIES = {
+    "full scan (all columns)": (["sum(id)", "sum(i)", "sum(d)", "sum(length(s))", "count(b)", "sum(dec)",
+                                 "max(dt)", "max(ts)"], None),
+    "one column": (["sum(d)"], "d double"),
+    "count(*)": (["count(*)"], "id long"),
+}
+
+
+def make_parquet(spark, rows=10_000_000, files=8, directory=None):
+    """Written by Spark with all defaults (snappy, INT96 timestamps, 128MB row groups)."""
+    d = directory or os.path.join(tempfile.gettempdir(), f"sds_pq_{rows}_{files}")
+    if not os.path.exists(d):
+        (spark.range(rows).selectExpr(
+            "id", "cast(id % 100 as int) i", "id / 8 d", "concat('user-', id % 100000) s",
+            "id % 2 = 0 b", "cast(id as decimal(18,2)) dec", "date_add(date'2020-01-01', cast(id % 1000 as int)) dt",
+            "timestamp'2024-01-01 00:00:00' + make_interval(0,0,0,0,0,0,id % 100000000) ts")
+         .repartition(files).write.parquet(d))
+    return d
+
+
+def parquet_bench(spark, directory, repeats=3):
+    out = []
+    n = spark.read.parquet(directory).count()
+    for name in ("parquet_builtin", "parquet_pyarrow", "parquet_rust"):
+        for q, (expr, ddl) in PQ_QUERIES.items():
+            def df():
+                if name == "parquet_builtin":
+                    return spark.read.parquet(directory)
+                r = spark.read.format(name).option("path", directory)
+                return (r.schema(ddl) if ddl else r).load()
+            nparts = df().rdd.getNumPartitions()
+            ts = _time(lambda: df().selectExpr(*expr).collect(), repeats)
+            out.append(dict(arm=name, label=LABELS[name], query=q, rows=n, partitions=nparts,
+                            median_s=statistics.median(ts), min_s=min(ts), rows_per_s=n / statistics.median(ts)))
+    return out
+
+
+def parquet_micro(directory, repeats=5):
+    """Decode every row group of one file outside Spark (pure decode cost, includes Arrow hand-off)."""
+    import glob as _g
+
+    from spark_datasources.parquet_source import ENGINES
+
+    path = sorted(_g.glob(os.path.join(directory, "*.parquet")))[0]
+    out = []
+    for engine, label in (("pyarrow", LABELS["parquet_pyarrow"]), ("rust", LABELS["parquet_rust"])):
+        inspect, batches = ENGINES[engine]
+        _, rgs = inspect(path)
+        n = sum(r for _, _, r in rgs)
+        ts = _time(lambda: sum(b.num_rows for b in batches(path, [i for i, _, _ in rgs])), repeats)
+        out.append(dict(arm="parquet_" + engine, label=label, rows=n, median_s=statistics.median(ts),
+                        rows_per_s=n / statistics.median(ts)))
+    return out

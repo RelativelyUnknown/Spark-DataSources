@@ -37,8 +37,15 @@ def main():
     print("\n== MQTT stream: 300 msgs x 1000 records (publish -> all rows in sink) ==")
     mq = harness.mqtt_bench(spark)
     print(table(mq, ["label", "rows", "median_s", "min_s", "rows_per_s"]))
+    pq_dir = harness.make_parquet(spark)
+    print("\n== Parquet decode, one file outside Spark ==")
+    pm = harness.parquet_micro(pq_dir)
+    print(table(pm, ["label", "rows", "median_s", "rows_per_s"]))
+    print("\n== Parquet in Spark: 10M rows, 8 files (written by Spark with defaults) ==")
+    pq = harness.parquet_bench(spark, pq_dir, a.repeats)
+    print(table(pq, ["label", "query", "partitions", "median_s", "min_s", "rows_per_s"]))
     if a.json:
-        json.dump({"micro": m, "spark": s, "logs": lg, "writers": wr, "mqtt": mq}, open(a.json, "w"), indent=1)
+        json.dump({"micro": m, "spark": s, "logs": lg, "writers": wr, "mqtt": mq, "parquet_micro": pm, "parquet": pq}, open(a.json, "w"), indent=1)
 
 
 if __name__ == "__main__":

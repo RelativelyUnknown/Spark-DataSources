@@ -217,6 +217,170 @@ fn decode_messages_tuples(
     .map_err(err)
 }
 
+// ---------------------------------------------------------------- Parquet reader
+// Mirrors what Spark hands back for a parquet scan: INT96 / any timestamp -> timestamp[us, UTC],
+// every field nullable. Footer inspection + a streaming, GIL-free batch iterator per row-group set.
+use arrow::compute::cast;
+use arrow::datatypes::{SchemaRef, TimeUnit};
+use parquet::arrow::arrow_reader::{
+    ArrowReaderMetadata, ArrowReaderOptions, ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder,
+};
+
+fn relax_field(f: &Field) -> Field {
+    Field::new(f.name(), spark_type(f.data_type()), true)
+}
+
+fn spark_type(dt: &DataType) -> DataType {
+    match dt {
+        DataType::Timestamp(_, _) => DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+        DataType::List(f) => DataType::List(Arc::new(relax_field(f))),
+        DataType::LargeList(f) => DataType::LargeList(Arc::new(relax_field(f))),
+        DataType::Struct(fs) => DataType::Struct(fs.iter().map(|f| relax_field(f)).collect()),
+        DataType::Map(f, sorted) => DataType::Map(Arc::new(relax_field(f)), *sorted),
+        other => other.clone(),
+    }
+}
+
+fn spark_schema(schema: &Schema) -> SchemaRef {
+    Arc::new(Schema::new(
+        schema
+            .fields()
+            .iter()
+            .map(|f| relax_field(f))
+            .collect::<Vec<_>>(),
+    ))
+}
+
+fn open_builder(path: &str) -> Result<ParquetRecordBatchReaderBuilder<File>, String> {
+    let ctx = |e: parquet::errors::ParquetError| format!("{path}: {e}");
+    let f = File::open(path).map_err(|e| format!("{path}: {e}"))?;
+    // Ask the decoder for Spark's types up-front so INT96 timestamps decode straight to
+    // timestamp[us, UTC] instead of ns followed by a cast.
+    let meta = ArrowReaderMetadata::load(&f, ArrowReaderOptions::new()).map_err(ctx)?;
+    // hint = file schema with only timestamp units changed (hints must keep nullability)
+    let hint = Arc::new(Schema::new(
+        meta.schema()
+            .fields()
+            .iter()
+            .map(|f| match f.data_type() {
+                DataType::Timestamp(_, _) => Field::new(
+                    f.name(),
+                    DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+                    f.is_nullable(),
+                ),
+                _ => f.as_ref().clone(),
+            })
+            .collect::<Vec<_>>(),
+    ));
+    let hinted = ArrowReaderMetadata::try_new(
+        meta.metadata().clone(),
+        ArrowReaderOptions::new().with_schema(hint),
+    )
+    .map_err(ctx)?;
+    Ok(ParquetRecordBatchReaderBuilder::new_with_metadata(f, hinted))
+}
+
+/// -> (pyarrow.Schema in Spark-compatible types, [(row_group, compressed_bytes, rows)])
+#[pyfunction]
+fn parquet_inspect<'py>(
+    py: Python<'py>,
+    path: &str,
+) -> PyResult<(Bound<'py, PyAny>, Vec<(usize, i64, i64)>)> {
+    let (schema, rgs) = py
+        .detach(|| {
+            let b = open_builder(path)?;
+            let rgs = b
+                .metadata()
+                .row_groups()
+                .iter()
+                .enumerate()
+                .map(|(i, rg)| (i, rg.compressed_size(), rg.num_rows()))
+                .collect::<Vec<_>>();
+            Ok::<_, String>((spark_schema(b.schema()), rgs))
+        })
+        .map_err(err)?;
+    Ok((schema.as_ref().to_pyarrow(py)?, rgs))
+}
+
+#[pyclass(unsendable)]
+struct ParquetBatches {
+    reader: ParquetRecordBatchReader,
+    target: SchemaRef,
+}
+
+#[pymethods]
+impl ParquetBatches {
+    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    fn __next__<'py>(&mut self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
+        let target = self.target.clone();
+        let reader = &mut self.reader;
+        let next = py.detach(|| {
+            reader.next().map(|r| {
+                r.map_err(|e| e.to_string()).and_then(|b| {
+                    let cols = b
+                        .columns()
+                        .iter()
+                        .zip(target.fields())
+                        .map(|(c, f)| {
+                            if c.data_type() == f.data_type() {
+                                Ok(c.clone())
+                            } else {
+                                cast(c, f.data_type()).map_err(|e| e.to_string())
+                            }
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    RecordBatch::try_new(target.clone(), cols).map_err(|e| e.to_string())
+                })
+            })
+        });
+        match next {
+            None => Ok(None),
+            Some(Err(e)) => Err(err(e)),
+            Some(Ok(b)) => Ok(Some(b.to_pyarrow(py)?)),
+        }
+    }
+}
+
+/// Stream `row_groups` of `path` as pyarrow RecordBatches of up to `batch_size` rows.
+#[pyfunction]
+#[pyo3(signature = (path, row_groups, batch_size=65536, columns=None))]
+fn parquet_batches(
+    py: Python<'_>,
+    path: &str,
+    row_groups: Vec<usize>,
+    batch_size: usize,
+    columns: Option<Vec<String>>,
+) -> PyResult<ParquetBatches> {
+    py.detach(|| {
+        let mut b = open_builder(path)?;
+        let mut full = spark_schema(b.schema());
+        if let Some(cols) = columns {
+            // case-insensitive (spark.sql.caseSensitive=false), unknown names are simply absent
+            let idx: Vec<usize> = full
+                .fields()
+                .iter()
+                .enumerate()
+                .filter(|(_, f)| cols.iter().any(|c| c.eq_ignore_ascii_case(f.name())))
+                .map(|(i, _)| i)
+                .collect();
+            let mask = parquet::arrow::ProjectionMask::roots(b.parquet_schema(), idx.iter().copied());
+            full = Arc::new(Schema::new(idx.iter().map(|&i| full.field(i).clone()).collect::<Vec<_>>()));
+            b = b.with_projection(mask);
+        }
+        let target = full;
+        let reader = b
+            .with_row_groups(row_groups)
+            .with_batch_size(batch_size)
+            .build()
+            .map_err(|e| e.to_string())?;
+        Ok::<_, String>(ParquetBatches { reader, target })
+    })
+    .map_err(err)
+}
+
 #[pymodule]
 fn sparkhttp_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(fetch_tuples, m)?)?;
@@ -225,5 +389,8 @@ fn sparkhttp_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(parse_logs_batch, m)?)?;
     m.add_function(wrap_pyfunction!(write_ndjson, m)?)?;
     m.add_function(wrap_pyfunction!(decode_messages_tuples, m)?)?;
+    m.add_function(wrap_pyfunction!(parquet_inspect, m)?)?;
+    m.add_function(wrap_pyfunction!(parquet_batches, m)?)?;
+    m.add_class::<ParquetBatches>()?;
     Ok(())
 }

@@ -2,6 +2,7 @@ import importlib
 
 from .base import make_log_source, make_source, make_writer_source
 from .mqtt import make_mqtt_source
+from .parquet_source import make_parquet_source
 
 PY = "spark_datasources.pure_python"
 # registered name -> (factory, module, attr[, extra]); resolved lazily so a missing native build
@@ -29,8 +30,10 @@ _SPECS = {
     "mqtt_rust": (make_mqtt_source, "sparkhttp_rs", "decode_messages_tuples"),
     "mqtt_cython": (make_mqtt_source, "sparkhttp_cy", "decode_messages_tuples"),
 }
-
 SOURCES = {}
+# parquet: (name, engine); engine rust needs the native module, resolved at read time
+for _n, _e in (("parquet_rust", "rust"), ("parquet_pyarrow", "pyarrow")):
+    SOURCES[_n] = make_parquet_source(_n, _e)
 for _name, (_factory, _mod, _attr) in _SPECS.items():
     try:
         SOURCES[_name] = _factory(_name, getattr(importlib.import_module(_mod), _attr))
