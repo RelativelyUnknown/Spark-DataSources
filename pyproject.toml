@@ -6,7 +6,7 @@ requires-python = ">=3.10"
 dependencies = ["pyspark>=4.0", "pyarrow", "orjson", "sparkhttp-rs", "sparkhttp-cy"]
 
 [dependency-groups]
-dev = ["pytest", "marimo", "pandas<3", "altair"]
+dev = ["pytest", "marimo", "pandas<3", "altair", "amqtt", "paho-mqtt"]
 
 [build-system]
 requires = ["setuptools>=68"]

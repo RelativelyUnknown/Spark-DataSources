@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Spark data source benchmarks</title>
+<style>
+:root{color-scheme:light;--bg:#fcfcfb;--ink:#0b0b0b;--ink2:#52514e;--grid:#e6e5e1;
+--c-py:#2a78d6;--c-pya:#eb6834;--c-rs:#1baf7a;--c-rsa:#eda100;--c-cy:#e87ba4}
+@media (prefers-color-scheme:dark){:root:where(:not([data-theme="light"])){color-scheme:dark;--bg:#1a1a19;--ink:#f0efec;--ink2:#c3c2b7;--grid:#34332f;
+--c-py:#3987e5;--c-pya:#d95926;--c-rs:#199e70;--c-rsa:#c98500;--c-cy:#d55181}}
+:root[data-theme="dark"]{color-scheme:dark;--bg:#1a1a19;--ink:#f0efec;--ink2:#c3c2b7;--grid:#34332f;
+--c-py:#3987e5;--c-pya:#d95926;--c-rs:#199e70;--c-rsa:#c98500;--c-cy:#d55181}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.45 system-ui,sans-serif}
+main{max-width:860px;margin:0 auto;padding:24px 16px 48px}
+h1{font-size:22px;margin:0 0 4px}p.s{color:var(--ink2);margin:0 0 16px}
+.tabs{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:18px}
+button{font:inherit;color:var(--ink);background:none;border:1px solid var(--grid);border-radius:8px;padding:6px 12px;cursor:pointer}
+button[aria-pressed=true]{border-color:var(--ink);font-weight:600}
+.row{display:grid;grid-template-columns:minmax(120px,210px) 1fr;gap:12px;align-items:center;margin:10px 0}
+.lab{font-size:14px}.track{position:relative;height:30px;border-left:1px solid var(--ink2)}
+.bar{height:22px;margin-top:4px;border-radius:0 4px 4px 0;width:0;transition:width 1.1s cubic-bezier(.2,.7,.2,1)}
+.val{position:absolute;top:4px;left:calc(var(--w) + 8px);line-height:22px;font-size:13px;white-space:nowrap;opacity:0;transition:opacity .4s 1s}
+.go .val{opacity:1}.sp{color:var(--ink2)}
+table{border-collapse:collapse;width:100%;font-size:13px;margin-top:12px}td,th{text-align:left;padding:4px 8px;border-bottom:1px solid var(--grid)}
+.foot{color:var(--ink2);font-size:13px;margin-top:20px}
+@media (prefers-reduced-motion:reduce){.bar,.val{transition:none}}
+@media (max-width:520px){.row{grid-template-columns:1fr;gap:2px}}
+</style></head><body><main>
+<h1>PySpark data sources: Python vs Rust vs Cython</h1>
+<p class="s">Throughput in rows/s — longer is faster. Same data, same schema, identical output across implementations.</p>
+<div class="tabs" id="tabs" role="group" aria-label="Workload"></div>
+<h2 id="t" style="font-size:17px;margin:0"></h2><p class="s" id="st"></p>
+<div id="chart"></div>
+<div style="display:flex;gap:8px;margin-top:8px"><button id="replay">▶ Replay</button><button id="tbl" aria-pressed="false">Table view</button></div>
+<div id="table"></div>
+<p class="foot">Local mode, 4 shared cores (Spark JVM + mock server on the same box); single run, medians — directional, not a lab benchmark.
+Each bar is labelled with its value, so colour is never the only cue. Speedup is relative to the pure-Python tuple baseline of that workload.</p>
+</main><script>
+const P=[{"title": "HTTP \u00b7 one page", "sub": "50k rows fetched + parsed outside Spark", "rows": [{"label": "Python (json, tuples)", "v": 1103730.4898529334, "k": "py", "t": 0.04530091399999492}, {"label": "Python (json -> Arrow)", "v": 974802.8855964562, "k": "pya", "t": 0.051292420999971}, {"label": "Rust (tuples)", "v": 2642556.8238340598, "k": "rs", "t": 0.018921068999929957}, {"label": "Rust (Arrow, zero-copy)", "v": 4375652.5739031015, "k": "rsa", "t": 0.011426866999954655}, {"label": "Cython + orjson (tuples)", "v": 1880622.9450700134, "k": "cy", "t": 0.026586934999954792}]}, {"title": "HTTP \u00b7 scan", "sub": "1M rows, 4 partitions \u00b7 read + sum in Spark", "rows": [{"label": "Python (json, tuples)", "v": 958568.4358618727, "k": "py", "t": 1.043222333000017}, {"label": "Python (json -> Arrow)", "v": 1813515.0307100208, "k": "pya", "t": 0.5514153359999909}, {"label": "Rust (tuples)", "v": 1840589.059030306, "k": "rs", "t": 0.5433043269999871}, {"label": "Rust (Arrow, zero-copy)", "v": 3862742.6917767427, "k": "rsa", "t": 0.25888341000006676}, {"label": "Cython + orjson (tuples)", "v": 1884349.4328995582, "k": "cy", "t": 0.5306871340000043}]}, {"title": "HTTP \u00b7 toPandas", "sub": "1M rows, 4 partitions \u00b7 read + transfer to driver", "rows": [{"label": "Python (json, tuples)", "v": 553888.8480075564, "k": "py", "t": 1.8054163820000895}, {"label": "Python (json -> Arrow)", "v": 1129617.094540558, "k": "pya", "t": 0.8852557250000928}, {"label": "Rust (tuples)", "v": 993604.3950508309, "k": "rs", "t": 1.0064367720000291}, {"label": "Rust (Arrow, zero-copy)", "v": 1385638.4025139967, "k": "rsa", "t": 0.7216890049999165}, {"label": "Cython + orjson (tuples)", "v": 914399.2042898348, "k": "cy", "t": 1.0936142499999733}]}, {"title": "Gzip logs", "sub": "4 files \u00d7 250k lines \u00b7 regex parse", "rows": [{"label": "Cython + re (tuples)", "v": 982453.0187011759, "k": "cy", "t": 1.0178603770000336}, {"label": "Python re (tuples)", "v": 1070795.6673238303, "k": "py", "t": 0.9338849890000347}, {"label": "Python re -> Arrow", "v": 1339940.1889289732, "k": "pya", "t": 0.7463019680000116}, {"label": "Rust regex (tuples)", "v": 1325308.0822101668, "k": "rs", "t": 0.7545415390000016}, {"label": "Rust regex (Arrow)", "v": 2264390.327905897, "k": "rsa", "t": 0.4416199749999805}]}, {"title": "NDJSON writer", "sub": "500k rows, 4 partitions \u00b7 df.write", "rows": [{"label": "Cython + orjson (Rows)", "v": 756172.3212247541, "k": "cy", "t": 0.6612249429999792}, {"label": "Python json (Rows)", "v": 487463.03995515354, "k": "py", "t": 1.0257187910000312}, {"label": "Python json (Arrow -> dicts)", "v": 679100.3115545773, "k": "pya", "t": 0.7362682529999347}, {"label": "Rust arrow-json (Arrow)", "v": 2687664.1900773644, "k": "rsa", "t": 0.1860351459999947}]}, {"title": "MQTT stream", "sub": "300 msgs \u00d7 1000 records \u00b7 broker-bound", "rows": [{"label": "Cython + orjson", "v": 51148.473031541376, "k": "cy", "t": 5.865277734000017}, {"label": "Python json", "v": 63940.12246581828, "k": "py", "t": 4.691889668500039}, {"label": "Rust serde_json", "v": 53714.63842066505, "k": "rs", "t": 5.585069709499976}]}];const fmt=n=>n>=1e6?(n/1e6).toFixed(2)+"M":(n/1e3).toFixed(0)+"k";
+let cur=0;const $=id=>document.getElementById(id);
+function draw(){const p=P[cur];$("t").textContent=p.title;$("st").textContent=p.sub;
+ const base=(p.rows.find(r=>r.k==="py")||p.rows[0]).v,max=Math.max(...p.rows.map(r=>r.v));
+ const sorted=[...p.rows].sort((a,b)=>b.v-a.v);
+ $("chart").className="";$("chart").innerHTML=sorted.map(r=>{const w=(r.v/max*70).toFixed(1);
+ return `<div class="row"><div class="lab">${r.label}</div><div class="track" style="--w:${w}%" title="${r.label}: ${Math.round(r.v).toLocaleString()} rows/s">
+ <div class="bar" data-w="${w}" style="background:var(--c-${r.k})"></div><span class="val"><b>${fmt(r.v)}</b> rows/s <span class="sp">· ${(r.v/base).toFixed(2)}× </span></span></div></div>`}).join("");
+ $("table").innerHTML=$("tbl").getAttribute("aria-pressed")==="true"?`<table><tr><th>Implementation</th><th>rows/s</th><th>median s</th><th>vs Python</th></tr>${sorted.map(r=>`<tr><td>${r.label}</td><td>${Math.round(r.v).toLocaleString()}</td><td>${r.t==null?"":r.t.toFixed(3)}</td><td>${(r.v/base).toFixed(2)}×</td></tr>`).join("")}</table>`:"";
+ requestAnimationFrame(()=>requestAnimationFrame(()=>{document.querySelectorAll(".bar").forEach((b,i)=>setTimeout(()=>b.style.width=b.dataset.w+"%",i*120));$("chart").className="go"}))}
+$("tabs").innerHTML=P.map((p,i)=>`<button data-i="${i}" aria-pressed="${i===0}">${p.title}</button>`).join("");
+$("tabs").onclick=e=>{const b=e.target.closest("button");if(!b)return;cur=+b.dataset.i;[...$("tabs").children].forEach(c=>c.setAttribute("aria-pressed",c===b));draw()};
+$("replay").onclick=draw;$("tbl").onclick=()=>{$("tbl").setAttribute("aria-pressed",$("tbl").getAttribute("aria-pressed")!=="true");draw()};
+draw();
+</script></body></html>

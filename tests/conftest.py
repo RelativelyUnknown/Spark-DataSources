@@ -4,7 +4,8 @@ from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "bench"))
+BENCH = str(Path(__file__).resolve().parent.parent / "bench")
+sys.path.insert(0, BENCH)
 import mock_server  # noqa: E402
 
 from spark_datasources import register_all  # noqa: E402

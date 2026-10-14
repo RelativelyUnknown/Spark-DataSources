@@ -27,8 +27,18 @@ def main():
     print(f"\n== Spark end-to-end: {a.rows:,} rows, {a.partitions} partitions ==")
     s = harness.spark_bench(spark, url, a.rows, a.partitions, a.page_size, repeats=a.repeats)
     print(table(s, ["label", "action", "median_s", "min_s", "rows_per_s"]))
+    logs_dir = harness.make_logs(4, 250_000)
+    print("\n== gzip access logs: 4 files x 250k lines ==")
+    lg = harness.logs_bench(spark, logs_dir, a.repeats)
+    print(table(lg, ["label", "rows", "median_s", "min_s", "rows_per_s"]))
+    print("\n== NDJSON writer: 500k rows, 4 partitions ==")
+    wr = harness.writer_bench(spark, url, 500_000, 4, a.repeats)
+    print(table(wr, ["label", "rows", "median_s", "min_s", "rows_per_s"]))
+    print("\n== MQTT stream: 300 msgs x 1000 records (publish -> all rows in sink) ==")
+    mq = harness.mqtt_bench(spark)
+    print(table(mq, ["label", "rows", "median_s", "min_s", "rows_per_s"]))
     if a.json:
-        json.dump({"micro": m, "spark": s}, open(a.json, "w"), indent=1)
+        json.dump({"micro": m, "spark": s, "logs": lg, "writers": wr, "mqtt": mq}, open(a.json, "w"), indent=1)
 
 
 if __name__ == "__main__":

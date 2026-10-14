@@ -1,28 +1,45 @@
-from .base import make_source
+import importlib
 
-# name -> (module path, attr) resolved lazily so a missing native build only disables that arm
+from .base import make_log_source, make_source, make_writer_source
+from .mqtt import make_mqtt_source
+
+PY = "spark_datasources.pure_python"
+# registered name -> (factory, module, attr[, extra]); resolved lazily so a missing native build
+# only disables that arm
 _SPECS = {
-    "http_py": ("spark_datasources.pure_python", "fetch_tuples"),
-    "http_py_arrow": ("spark_datasources.pure_python", "fetch_batch"),
-    "http_rust": ("sparkhttp_rs", "fetch_tuples"),
-    "http_rust_arrow": ("sparkhttp_rs", "fetch_batch"),
-    "http_cython": ("sparkhttp_cy", "fetch_tuples"),
+    # HTTP + JSON reader
+    "http_py": (make_source, PY, "fetch_tuples"),
+    "http_py_arrow": (make_source, PY, "fetch_batch"),
+    "http_rust": (make_source, "sparkhttp_rs", "fetch_tuples"),
+    "http_rust_arrow": (make_source, "sparkhttp_rs", "fetch_batch"),
+    "http_cython": (make_source, "sparkhttp_cy", "fetch_tuples"),
+    # gzip access-log reader
+    "logs_py": (make_log_source, PY, "parse_logs_tuples"),
+    "logs_py_arrow": (make_log_source, PY, "parse_logs_batch"),
+    "logs_rust": (make_log_source, "sparkhttp_rs", "parse_logs_tuples"),
+    "logs_rust_arrow": (make_log_source, "sparkhttp_rs", "parse_logs_batch"),
+    "logs_cython": (make_log_source, "sparkhttp_cy", "parse_logs_tuples"),
+    # NDJSON writers
+    "ndjson_py": (lambda n, f: make_writer_source(n, f, False), PY, "write_rows"),
+    "ndjson_py_arrow": (lambda n, f: make_writer_source(n, f, True), PY, "write_batch"),
+    "ndjson_rust_arrow": (lambda n, f: make_writer_source(n, f, True), "sparkhttp_rs", "write_ndjson"),
+    "ndjson_cython": (lambda n, f: make_writer_source(n, f, False), "sparkhttp_cy", "write_rows"),
+    # MQTT streaming readers (decode only; simple stream reader returns rows)
+    "mqtt_py": (make_mqtt_source, PY, "decode_messages_tuples"),
+    "mqtt_rust": (make_mqtt_source, "sparkhttp_rs", "decode_messages_tuples"),
+    "mqtt_cython": (make_mqtt_source, "sparkhttp_cy", "decode_messages_tuples"),
 }
 
-
-def _load(spec):
-    import importlib
-
-    mod, attr = spec
-    return getattr(importlib.import_module(mod), attr)
-
-
 SOURCES = {}
-for _name, _spec in _SPECS.items():
+for _name, (_factory, _mod, _attr) in _SPECS.items():
     try:
-        SOURCES[_name] = make_source(_name, _load(_spec))
+        SOURCES[_name] = _factory(_name, getattr(importlib.import_module(_mod), _attr))
     except ImportError:
         pass
+
+
+def group(prefix):
+    return sorted(n for n in SOURCES if n.startswith(prefix))
 
 
 def register_all(spark):

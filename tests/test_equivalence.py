@@ -1,6 +1,6 @@
 import pytest
 
-from spark_datasources import SOURCES
+from spark_datasources import SOURCES, group
 
 
 def read(spark, fmt, url, **opts):
@@ -11,10 +11,10 @@ def read(spark, fmt, url, **opts):
 
 
 def test_all_arms_registered():
-    assert set(SOURCES) == {"http_py", "http_py_arrow", "http_rust", "http_rust_arrow", "http_cython"}
+    assert len(group("http_")) == 5 and len(group("logs_")) == 5 and len(group("ndjson_")) == 4 and len(group("mqtt_")) == 3
 
 
-@pytest.mark.parametrize("fmt", sorted(SOURCES))
+@pytest.mark.parametrize("fmt", group("http_"))
 def test_matches_expected(spark, server_url, fmt):
     df = read(spark, fmt, server_url, total_rows=2500, partitions=3, page_size=400)
     assert df.rdd.getNumPartitions() == 3
@@ -27,5 +27,5 @@ def test_matches_expected(spark, server_url, fmt):
 
 def test_identical_across_arms(spark, server_url):
     ref = sorted(read(spark, "http_py", server_url, total_rows=1000).collect())
-    for fmt in sorted(set(SOURCES) - {"http_py"}):
+    for fmt in [f for f in group("http_") if f != "http_py"]:
         assert sorted(read(spark, fmt, server_url, total_rows=1000).collect()) == ref, fmt
