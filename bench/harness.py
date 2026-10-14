@@ -285,3 +285,34 @@ def fanout_bench(spark, url, total_rows=400_000, partitions=4, page_size=1000, l
                         concurrency=concurrency, median_s=statistics.median(ts), min_s=min(ts),
                         rows_per_s=total_rows / statistics.median(ts)))
     return out
+
+
+# ------------------------------------------------------------------ native-library enrichment
+LABELS.update({"enrich_py": "Python loop: h3 + xxhash + re (tuples)",
+               "enrich_py_arrow": "Python loop: h3 + xxhash + re (Arrow)",
+               "enrich_rust": "Rust: h3o + xxhash-rust + unicode-seg (Arrow)"})
+
+
+def enrich_micro(batch_rows=50_000, repeats=5):
+    """One batch outside Spark: input generation excluded (shared), enrichment only."""
+    from spark_datasources.enrich import ENRICHERS, make_points
+
+    b = make_points(0, batch_rows)
+    out = []
+    for name, fn in ENRICHERS.items():
+        ts = _time(lambda: fn(b, 9), repeats)
+        out.append(dict(arm=name, label=LABELS[name], rows=batch_rows, median_s=statistics.median(ts),
+                        rows_per_s=batch_rows / statistics.median(ts)))
+    return out
+
+
+def enrich_bench(spark, total_rows=2_000_000, partitions=4, repeats=3):
+    out = []
+    for name in group("enrich_"):
+        def run():
+            return (spark.read.format(name).option("total_rows", total_rows).option("partitions", partitions)
+                    .load().selectExpr("count(*)", "sum(h3 % 1000)", "sum(words)").collect())
+        ts = _time(run, repeats)
+        out.append(dict(arm=name, label=LABELS[name], rows=total_rows, median_s=statistics.median(ts),
+                        min_s=min(ts), rows_per_s=total_rows / statistics.median(ts)))
+    return out

@@ -12,7 +12,7 @@ def table(rows, cols):
     return head + "\n".join("| " + " | ".join(f(r[c]) for c in cols) + " |" for r in rows)
 
 
-SECTIONS = ("http", "logs", "writers", "mqtt", "parquet", "fanout")
+SECTIONS = ("http", "logs", "writers", "mqtt", "parquet", "fanout", "enrich")
 
 
 def main():
@@ -71,6 +71,13 @@ def main():
             print(table(out["fanout"], ["label", "rows", "median_s", "min_s", "rows_per_s"]))
         finally:
             aproc.terminate()
+    if "enrich" in a.only:
+        print("\n== enrichment kernel, one 50k-row batch outside Spark ==")
+        out["enrich_micro"] = harness.enrich_micro()
+        print(table(out["enrich_micro"], ["label", "rows", "median_s", "rows_per_s"]))
+        print("\n== enrichment in Spark: 2M generated rows, 4 partitions ==")
+        out["enrich"] = harness.enrich_bench(spark, 2_000_000, 4, a.repeats)
+        print(table(out["enrich"], cols))
     if a.json:
         json.dump(out, open(a.json, "w"), indent=1)
 

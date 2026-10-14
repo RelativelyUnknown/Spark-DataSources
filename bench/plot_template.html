@@ -3,11 +3,11 @@
 <title>Spark data source benchmarks</title>
 <style>
 :root{color-scheme:light;--bg:#fcfcfb;--ink:#0b0b0b;--ink2:#52514e;--grid:#e6e5e1;
---c-py:#2a78d6;--c-pya:#eb6834;--c-rs:#1baf7a;--c-rsa:#eda100;--c-cy:#e87ba4;--c-sp:#008300}
+--c-py:#2a78d6;--c-pya:#eb6834;--c-rs:#1baf7a;--c-rsa:#eda100;--c-cy:#e87ba4;--c-sp:#008300;--c-va:#6250d6}
 @media (prefers-color-scheme:dark){:root:where(:not([data-theme="light"])){color-scheme:dark;--bg:#1a1a19;--ink:#f0efec;--ink2:#c3c2b7;--grid:#34332f;
---c-py:#3987e5;--c-pya:#d95926;--c-rs:#199e70;--c-rsa:#c98500;--c-cy:#d55181;--c-sp:#008300}}
+--c-py:#3987e5;--c-pya:#d95926;--c-rs:#199e70;--c-rsa:#c98500;--c-cy:#d55181;--c-sp:#008300;--c-va:#9085e9}}
 :root[data-theme="dark"]{color-scheme:dark;--bg:#1a1a19;--ink:#f0efec;--ink2:#c3c2b7;--grid:#34332f;
---c-py:#3987e5;--c-pya:#d95926;--c-rs:#199e70;--c-rsa:#c98500;--c-cy:#d55181;--c-sp:#008300}
+--c-py:#3987e5;--c-pya:#d95926;--c-rs:#199e70;--c-rsa:#c98500;--c-cy:#d55181;--c-sp:#008300;--c-va:#9085e9}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.45 system-ui,sans-serif}
 main{max-width:860px;margin:0 auto;padding:24px 16px 48px}
 h1{font-size:22px;margin:0 0 4px}p.s{color:var(--ink2);margin:0 0 16px}
@@ -25,7 +25,7 @@ table{border-collapse:collapse;width:100%;font-size:13px;margin-top:12px}td,th{t
 @media (max-width:520px){.row{grid-template-columns:1fr;gap:2px}}
 </style></head><body><main>
 <h1>PySpark data sources: Python vs Rust vs Cython</h1>
-<p class="s">Throughput in rows/s — longer is faster. Same data, same schema, identical output across implementations.</p>
+<p class="s">Throughput (unit shown on each bar) — longer is faster. Same data, same schema, identical output across implementations.</p>
 <div class="tabs" id="tabs" role="group" aria-label="Workload"></div>
 <h2 id="t" style="font-size:17px;margin:0"></h2><p class="s" id="st"></p>
 <div id="chart"></div>
@@ -34,15 +34,15 @@ table{border-collapse:collapse;width:100%;font-size:13px;margin-top:12px}td,th{t
 <p class="foot">Local mode, 4 shared cores (Spark JVM + mock server on the same box); single run, medians — directional, not a lab benchmark.
 Each bar is labelled with its value, so colour is never the only cue. Multiplier is relative to the baseline of that workload: pure-Python tuples, or Spark's built-in reader for the Parquet panels.</p>
 </main><script>
-const P=/*DATA*/[];const fmt=n=>n>=1e6?(n/1e6).toFixed(2)+"M":(n/1e3).toFixed(0)+"k";
+const P=/*DATA*/[];const fmt=n=>n>=1e6?(n/1e6).toFixed(2)+"M":n>=1e4?(n/1e3).toFixed(0)+"k":n>=1e3?(n/1e3).toFixed(1)+"k":n>=100?n.toFixed(0):n.toFixed(1);
 let cur=0;const $=id=>document.getElementById(id);
 function draw(){const p=P[cur];$("t").textContent=p.title;$("st").textContent=p.sub;
  const bk=p.rows.find(r=>r.k==="sp")||p.rows.find(r=>r.k==="py")||p.rows[0],base=bk.v,bl=bk.k==="sp"?"built-in":"Python",max=Math.max(...p.rows.map(r=>r.v));
  const sorted=[...p.rows].sort((a,b)=>b.v-a.v);
  $("chart").className="";$("chart").innerHTML=sorted.map(r=>{const w=(r.v/max*70).toFixed(1);
- return `<div class="row"><div class="lab">${r.label}</div><div class="track" style="--w:${w}%" title="${r.label}: ${Math.round(r.v).toLocaleString()} rows/s">
- <div class="bar" data-w="${w}" style="background:var(--c-${r.k})"></div><span class="val"><b>${fmt(r.v)}</b> rows/s <span class="sp">· ${(r.v/base).toFixed(2)}× </span></span></div></div>`}).join("");
- $("table").innerHTML=$("tbl").getAttribute("aria-pressed")==="true"?`<table><tr><th>Implementation</th><th>rows/s</th><th>median s</th><th>vs baseline</th></tr>${sorted.map(r=>`<tr><td>${r.label}</td><td>${Math.round(r.v).toLocaleString()}</td><td>${r.t==null?"":r.t.toFixed(3)}</td><td>${(r.v/base).toFixed(2)}×</td></tr>`).join("")}</table>`:"";
+ return `<div class="row"><div class="lab">${r.label}</div><div class="track" style="--w:${w}%" title="${r.label}: ${Math.round(r.v).toLocaleString()} ${p.unit}">
+ <div class="bar" data-w="${w}" style="background:var(--c-${r.k})"></div><span class="val"><b>${fmt(r.v)}</b> ${p.unit} <span class="sp">· ${(r.v/base).toFixed(2)}× </span></span></div></div>`}).join("");
+ $("table").innerHTML=$("tbl").getAttribute("aria-pressed")==="true"?`<table><tr><th>Implementation</th><th>${p.unit}</th><th>median s</th><th>vs baseline</th></tr>${sorted.map(r=>`<tr><td>${r.label}</td><td>${Math.round(r.v).toLocaleString()}</td><td>${r.t==null?"":r.t.toFixed(3)}</td><td>${(r.v/base).toFixed(2)}×</td></tr>`).join("")}</table>`:"";
  requestAnimationFrame(()=>requestAnimationFrame(()=>{document.querySelectorAll(".bar").forEach((b,i)=>setTimeout(()=>b.style.width=b.dataset.w+"%",i*120));$("chart").className="go"}))}
 $("tabs").innerHTML=P.map((p,i)=>`<button data-i="${i}" aria-pressed="${i===0}">${p.title}</button>`).join("");
 $("tabs").onclick=e=>{const b=e.target.closest("button");if(!b)return;cur=+b.dataset.i;[...$("tabs").children].forEach(c=>c.setAttribute("aria-pressed",c===b));draw()};

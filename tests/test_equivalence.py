@@ -11,7 +11,7 @@ def read(spark, fmt, url, **opts):
 
 
 def test_all_arms_registered():
-    assert len(group("http_")) == 5 and len(group("logs_")) == 5 and len(group("ndjson_")) == 4 and len(group("mqtt_")) == 3 and len(group("fanout_")) == 5
+    assert len(group("http_")) == 5 and len(group("logs_")) == 5 and len(group("ndjson_")) == 4 and len(group("mqtt_")) == 3 and len(group("fanout_")) == 5 and len(group("enrich_")) == 3
 
 
 @pytest.mark.parametrize("fmt", group("http_"))
